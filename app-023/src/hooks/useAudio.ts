@@ -1,6 +1,8 @@
 // 播放状态集中管理：AudioContext / 调度 / 循环 / 高亮位置 / 独奏静音
 // UI 组件只负责显示与用户动作（保持状态逻辑集中在此 hook）
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+// 独奏/静音：作为 shouldPlay 谓词传给调度器，pump 时实时求值 ——
+// 起播/循环/中段起播都按同一套选择过滤；播放中切换立即生效且不重建调度器。
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ScheduleEvent, Score } from '../types';
 import { barTicks, totalTicks } from '../lib/grid';
 import { playRange, tickSeconds, type SchedulerHandle } from '../lib/audio';
@@ -14,8 +16,9 @@ export function useAudio(score: Score) {
   const ctxRef = useRef<AudioContext | null>(null);
   const masterRef = useRef<GainNode | null>(null);
   const handleRef = useRef<SchedulerHandle | null>(null);
+  const schedIdRef = useRef(0); // 调度句柄编号：每重建一次 +1（E2E 据此验证切换未打断播放）
   const [playing, setPlaying] = useState(false);
-  const [position, setPosition] = useState<{ bar: number; tick: number } | null>(null);
+  const [position, setPosition] = useState<{ bar: number; tick: number; insts: string[] } | null>(null);
   const [loop, setLoop] = useState<{ fromBar: number; toBar: number } | null>(null); // toBar 含
   const [soloMute, setSoloMute] = useState<SoloMute>({ solo: new Set(), muted: new Set() });
   const [debugEvents, setDebugEvents] = useState<ScheduleEvent[]>([]);
@@ -37,11 +40,14 @@ export function useAudio(score: Score) {
     return { ctx: ctxRef.current, master: masterRef.current! };
   }, []);
 
-  const audible = useCallback((ev: ScheduleEvent): boolean => {
+  /** 该乐器当前是否应响：有独奏则仅独奏响，否则非静音都响（读 ref，任何时候都是最新选择） */
+  const audibleInst = useCallback((id: string): boolean => {
     const { solo, muted } = soloMuteRef.current;
-    if (solo.size > 0) return solo.has(ev.instrumentId);
-    return !muted.has(ev.instrumentId);
+    if (solo.size > 0) return solo.has(id);
+    return !muted.has(id);
   }, []);
+
+  const audible = useCallback((ev: ScheduleEvent): boolean => audibleInst(ev.instrumentId), [audibleInst]);
 
   const stop = useCallback(() => {
     handleRef.current?.stop();
@@ -73,13 +79,19 @@ export function useAudio(score: Score) {
           if (toTick <= fromTick) return;
 
           const visual = (ev: ScheduleEvent) => {
+            // 触发瞬间再查一次：排程后才被静音的击点不点亮
             if (!audible(ev)) return;
-            const s2 = scoreRef.current;
-            const before = s2.bars.slice(0, ev.barIndex).reduce((a, b) => a + barTicks(b.beatsPerBar), 0);
-            setPosition({ bar: ev.barIndex, tick: before });
+            // 同一格的多乐器齐奏合并点亮；进入新一格则替换
+            setPosition((pos) =>
+              pos && pos.bar === ev.barIndex && pos.tick === ev.offset
+                ? { ...pos, insts: pos.insts.includes(ev.instrumentId) ? pos.insts : [...pos.insts, ev.instrumentId] }
+                : { bar: ev.barIndex, tick: ev.offset, insts: [ev.instrumentId] },
+            );
           };
-          const handle = playRange(ctx, master, s, fromTick, toTick, 1, visual);
+          // shouldPlay 实时读 soloMuteRef：起播/循环/中段起播按当前选择过滤，播放中切换也即时生效
+          const handle = playRange(ctx, master, s, fromTick, toTick, 1, visual, 0, audible);
           handleRef.current = handle;
+          schedIdRef.current += 1;
           setPlaying(true);
           const durS = (toTick - fromTick) * tickSeconds(s.bpm) + 0.25;
           window.setTimeout(() => {
@@ -93,6 +105,7 @@ export function useAudio(score: Score) {
           }, durS * 1000);
           // 调试钩子：E2E 用它断言调度精度
           (window as unknown as { __scheduled?: () => ScheduleEvent[] }).__scheduled = () => handle.scheduled();
+          (window as unknown as { __schedId?: () => number }).__schedId = () => schedIdRef.current;
         });
     },
     [ensureCtx, loop, audible, stop],
@@ -126,13 +139,15 @@ export function useAudio(score: Score) {
 
   useEffect(() => () => handleRef.current?.stop(), []);
 
-  // 独奏/静音即时生效：重触发当前区间播放
-  const restartIfPlaying = useMemo(
-    () => (playingRef: boolean) => {
-      if (playingRef) play();
-    },
-    [play],
-  );
+  // 独奏/静音变化立刻反映到高亮：把当前点亮中被禁的乐器马上摘掉，不等下一击。
+  // 声音侧无需在此处理 —— 调度器 pump 时实时查 shouldPlay，天然即时生效且不打断。
+  useEffect(() => {
+    setPosition((pos) => {
+      if (!pos) return pos;
+      const insts = pos.insts.filter((id) => audibleInst(id));
+      return insts.length === pos.insts.length ? pos : { ...pos, insts };
+    });
+  }, [soloMute, audibleInst]);
 
   return {
     playing,
@@ -145,7 +160,6 @@ export function useAudio(score: Score) {
     toggleSolo,
     toggleMute,
     debugEvents,
-    restartIfPlaying,
     ensureCtx,
   };
 }

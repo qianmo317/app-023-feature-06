@@ -1,5 +1,5 @@
 // 音频调度精度用例 —— 验收：BPM 120 连续 2 分钟偏差 < 10ms、无累积漂移；齐奏同刻发声
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { TICKS_PER_BEAT, type Score } from '../src/types';
 import { computeEvents, computeLoopEvents, scheduleEvents, tickSeconds } from '../src/lib/audio';
 import { scoreFromPattern, PATTERNS, newEmptyScore } from '../src/lib/factory';
@@ -141,6 +141,44 @@ describe('lookahead 调度器（mock ctx）', () => {
       const d = events[i].time - events[i - 1].time;
       expect(d).toBeGreaterThanOrEqual(-1e-12);
       expect(Math.round(d / per) * per - d).toBeCloseTo(0, 9);
+    }
+  });
+
+  it('独奏过滤：shouldPlay 只放行被独奏的乐器，其余击点不合成', () => {
+    const ctx = new FakeAudioContext() as unknown as AudioContext;
+    const score = jijifeng();
+    const total = totalTicks(score.bars);
+    const events = computeEvents(score.bars, score.bpm, false, score.instruments, 0, total, ctx.currentTime + 0.06);
+    const master = ctx.createGain();
+    const solo = new Set(['daluo']);
+    const handle = scheduleEvents(ctx, master, score, events, undefined, (ev) => solo.has(ev.instrumentId));
+    const first = handle.scheduled();
+    expect(first.length).toBeGreaterThan(0); // 首拍哐/才/七齐奏 → 只剩哐
+    expect(new Set(first.map((e) => e.instrumentId))).toEqual(new Set(['daluo']));
+    handle.stop();
+  });
+
+  it('播放中切换过滤立即生效：同一调度句柄，后续 pump 按新选择放行', () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = new FakeAudioContext() as unknown as AudioContext;
+      const score = jijifeng();
+      const total = totalTicks(score.bars);
+      const events = computeEvents(score.bars, score.bpm, false, score.instruments, 0, total, ctx.currentTime + 0.06);
+      const master = ctx.createGain();
+      const muted = new Set(['daluo']);
+      const handle = scheduleEvents(ctx, master, score, events, undefined, (ev) => !muted.has(ev.instrumentId));
+      expect(handle.scheduled().every((e) => e.instrumentId !== 'daluo')).toBe(true);
+      // 取消静音（不重建调度器）：推进时间后大锣也会被排入
+      muted.clear();
+      (ctx as unknown as { currentTime: number }).currentTime += 1;
+      vi.advanceTimersByTime(30); // 触发一次 pump
+      const ids = new Set(handle.scheduled().map((e) => e.instrumentId));
+      expect(ids.has('daluo')).toBe(true);
+      expect(ids.has('xiaoluo')).toBe(true);
+      handle.stop();
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

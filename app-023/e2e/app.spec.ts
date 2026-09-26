@@ -88,7 +88,7 @@ test.describe('试听', () => {
     await page.getByTestId('load-jijifeng').click();
     await expect(page.getByTestId('editor-page')).toBeVisible();
     await page.getByTestId('btn-play').click();
-    await expect(page.getByTestId('grid-highlight')).toBeVisible({ timeout: 3000 });
+    await expect(page.getByTestId('grid-highlight').first()).toBeVisible();
     await page.getByTestId('btn-play').click(); // 停止
     await expect(page.getByTestId('grid-highlight')).toHaveCount(0);
 
@@ -132,14 +132,92 @@ test.describe('试听', () => {
     await page.getByTestId('btn-play').click();
   });
 
-  test('独奏/静音切换', async ({ page }) => {
+  test('独奏/静音决定哪些乐器发声，循环与播放中切换都即时生效且不打断', async ({ page }) => {
     await page.goto('#/library');
     await page.getByTestId('load-jijifeng').click();
     await expect(page.getByTestId('editor-page')).toBeVisible();
+
+    type SchedEv = { time: number; instrumentId: string };
+    const scheduled = () =>
+      page.evaluate(
+        () => (window as unknown as { __scheduled?: () => SchedEv[] }).__scheduled?.() ?? [],
+      );
+    const schedId = () =>
+      page.evaluate(() => (window as unknown as { __schedId?: () => number }).__schedId?.() ?? -1);
+    const hilited = () =>
+      page.$$eval('[data-testid="grid-highlight"]', (els) => els.map((e) => e.getAttribute('data-inst')));
+
+    // 先设整段循环（急急风 4 小节约 3.2s/遍）：既验证「循环也按选择过滤」，又给中途切换留出采样窗口
+    await page.getByTestId('btn-loop-set').click();
+    await expect(page.getByTestId('btn-loop-clear')).toBeVisible();
+
+    // 起播前独奏大锣：实际合成的击点都只能是大锣
     await page.getByTestId('solo-daluo').click();
     await expect(page.getByTestId('solo-daluo')).toHaveClass(/on/);
-    await page.getByTestId('mute-gu').click();
-    await expect(page.getByTestId('mute-gu')).toHaveClass(/on/);
+    await page.getByTestId('btn-play').click();
+    await expect
+      .poll(async () => (await scheduled()).length, { timeout: 8000, intervals: [200] })
+      .toBeGreaterThan(5);
+    expect(new Set((await scheduled()).map((e) => e.instrumentId))).toEqual(new Set(['daluo']));
+    await expect.poll(hilited, { timeout: 2000 }).toEqual(['daluo']);
+
+    // 等进入第二遍并走到中段（约 4.6s），保证下面的采样窗口距两端循环边界都足够远，
+    // 不会与「自然换遍重建调度器」混淆
+    const idBefore = await schedId();
+    await expect.poll(schedId, { timeout: 4000, intervals: [100] }).not.toBe(idBefore);
+    const idLoop2 = await schedId();
+    await page.waitForTimeout(500); // 第二遍刚开头（距下一遍边界还约 2.9s，保证下面窗口不跨自然换遍）
+
+    // 播放中取消独奏、改为静音大锣（不停止播放）。
+    // 注：「关独奏」与「开静音」是两次点击，中间有合法的全放行瞬间（大锣在那一下本就该响），
+    // 因此只在过滤生效（才/七已点亮）之后，再检查后续拍子。
+    await page.getByTestId('solo-daluo').click();
+    await page.getByTestId('mute-daluo').click();
+    await expect(page.getByTestId('mute-daluo')).toHaveClass(/on/);
+    const filterApplied = () =>
+      hilited().then((rows) => rows.includes('xiaoluo') || rows.includes('bo'));
+    await expect.poll(filterApplied, { timeout: 3000, intervals: [80] }).toBe(true);
+
+    // 过滤已生效：后续多个拍子里才/七持续响、大锣不再点亮
+    let sawOtherAfter = false;
+    let sawDaluoAfter = false;
+    for (let i = 0; i < 10; i++) {
+      await page.waitForTimeout(120);
+      const rows = await hilited();
+      if (rows.includes('xiaoluo') || rows.includes('bo')) sawOtherAfter = true;
+      if (rows.includes('daluo')) sawDaluoAfter = true;
+    }
+    expect(sawOtherAfter).toBe(true);
+    expect(sawDaluoAfter).toBe(false);
+    // 切换没有打断重来：采样窗口内仍是同一个调度句柄
+    expect(await schedId()).toBe(idLoop2);
+    await expect(page.getByTestId('btn-play')).toContainText('停止');
+
+    // 之后自然循环换遍（重建调度器）：新一遍仍按同一选择过滤，大锣依旧不响
+    await expect.poll(schedId, { timeout: 4000, intervals: [150] }).not.toBe(idLoop2);
+    let sawOtherLoop3 = false;
+    for (let i = 0; i < 11; i++) {
+      await page.waitForTimeout(120);
+      const rows = await hilited();
+      if (rows.includes('xiaoluo') || rows.includes('bo')) sawOtherLoop3 = true;
+      expect(rows).not.toContain('daluo');
+    }
+    expect(sawOtherLoop3).toBe(true);
+
+    // 全部取消独奏与静音后停止、重新起播：每个乐器都响（急急风首拍即哐/才/七三件齐奏）
+    await page.getByTestId('mute-daluo').click();
+    await expect(page.getByTestId('mute-daluo')).not.toHaveClass(/on/);
+    await page.getByTestId('btn-play').click(); // 停止
+    await page.getByTestId('btn-loop-clear').click();
+    await page.getByTestId('btn-play').click(); // 重新起播
+    await expect
+      .poll(
+        async () => new Set((await scheduled()).map((e) => e.instrumentId)).size,
+        { timeout: 5000, intervals: [100] },
+      )
+      .toBeGreaterThanOrEqual(3);
+    await expect.poll(hilited, { timeout: 2000 }).not.toEqual(['daluo']);
+    await page.getByTestId('btn-play').click();
   });
 });
 

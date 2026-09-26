@@ -18,7 +18,8 @@ interface Props {
   barGap?: number;
   barsPerRow?: number;
   selection?: Selection | null;
-  highlight?: Selection | null;
+  /** 播放高亮：insts 给出时只点亮这些乐器的行（跟着会响的乐器走）；缺省为整列 */
+  highlight?: (Selection & { insts?: string[] }) | null;
   selectedInstrument?: string | null;
   showJianpu?: boolean;
   showBeatHighlightBg?: boolean;
@@ -91,6 +92,7 @@ export function ScoreGrid({
         const gx = x + labelW;
         const selHere = selection?.bar === barIndex ? selection : null;
         const hiHere = highlight?.bar === barIndex ? highlight : null;
+        const hiInsts = hiHere?.insts ?? null;
         return (
           <g key={barIndex} data-testid={`${testIdPrefix}-bar-${barIndex}`}>
             {/* 小节号 */}
@@ -270,8 +272,8 @@ export function ScoreGrid({
               stroke="#c0392b"
               strokeWidth={1.5}
             />
-            {/* 播放高亮列（当前拍，可关） */}
-            {showBeatHighlightBg && hiHere && (
+            {/* 播放高亮（当前拍，可关）：insts 给出时按行点亮会响的乐器，否则整列 */}
+            {showBeatHighlightBg && hiHere && hiInsts === null && (
               <rect
                 x={gx + Math.floor(hiHere.tick / TICKS_PER_BEAT) * TICKS_PER_BEAT * pxPerTick}
                 y={y + gridTop}
@@ -282,6 +284,24 @@ export function ScoreGrid({
                 data-testid={`${testIdPrefix}-highlight`}
               />
             )}
+            {showBeatHighlightBg &&
+              hiHere &&
+              hiInsts !== null &&
+              instruments.map((inst, r) =>
+                hiInsts.includes(inst.id) ? (
+                  <rect
+                    key={inst.id}
+                    x={gx + Math.floor(hiHere.tick / TICKS_PER_BEAT) * TICKS_PER_BEAT * pxPerTick}
+                    y={y + gridTop + r * rowHeight}
+                    width={TICKS_PER_BEAT * pxPerTick}
+                    height={rowHeight}
+                    fill="#ffe9a8"
+                    opacity={0.55}
+                    data-inst={inst.id}
+                    data-testid={`${testIdPrefix}-highlight`}
+                  />
+                ) : null,
+              )}
             {/* 选中光标列 */}
             {selHere && (
               <rect
