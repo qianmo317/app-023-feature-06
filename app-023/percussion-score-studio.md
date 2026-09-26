@@ -103,7 +103,7 @@ IndexedDB 库名 `app023-percussion`，对象仓 `scores`（keyPath `id`，索�
 
 ### 已知实现边界
 逐条核对 README 声称与代码实际行为，以下为不一致或未接线的部分：
-1. 独奏/静音不改变发声：`audible()` 只被 `visual()` 调用（`src/hooks/useAudio.ts:76`），调度路径 `playRange → scheduleEvents → synthesizeHit` 不读 `soloMute`，点「独」/「默」只影响高亮更新（README §3）。
+1. ~~独奏/静音不改变发声~~（已修复）：`audible()` 实时谓词由 `useAudio` 传入 `playRange → scheduleEvents`，调度器每次 pump 重新求值（`src/lib/audio.ts` `scheduleEvents`），点「独」/「默」即决定哪些乐器合成发声；播放中切换立即生效且不打断当前小节，高亮列只跟随会响的乐器。
 2. 散板伸缩未接线：`currentBeatStretch` 只在设置页读写（`src/settingsContext.tsx:37`、`src/pages/Settings.tsx:57-68`），`playRange` 调用 `computeLoopEvents` / `computeEvents` 时不传 `stretch`，实际恒为 1（`src/lib/audio.ts:261-264`，README §4.4）。
 3. 播放高亮列定位有误：`position.tick` 存的是小节绝对起始格（`src/hooks/useAudio.ts:77-79`），`ScoreGrid` 又把它当小节内偏移使用（`src/components/ScoreGrid.tsx:276`），高亮固定落在小节首拍处，与 README §4.3「不会与声音错位」不符。
 4. 散板「不画严格拍格」未实现：`ScoreGrid` 不读取 `freeMeter`，始终按每拍 4 格画拍线与格线（`src/components/ScoreGrid.tsx:247-262`，README §4.4）。

@@ -207,6 +207,8 @@ const TIMER_MS = 25; // 轮询间隔（只负责填窗口，不负责发声时�
 /**
  * lookahead 调度器：setInterval 仅做窗口填充，发声时刻由 Web Audio 精确执行。
  * events 必须已按 time 升序；调用方保证 startAt >= ctx.currentTime。
+ * audible（独奏/静音）在每次 pump 时实时求值：播放中切换立即生效，
+ * 事件队列与时间轴保持不动——不重排、不打断当前小节。
  */
 export function scheduleEvents(
   ctx: AudioContext,
@@ -214,6 +216,7 @@ export function scheduleEvents(
   score: Score,
   events: ScheduleEvent[],
   onVisual?: (ev: ScheduleEvent) => void,
+  audible?: (ev: ScheduleEvent) => boolean,
 ): SchedulerHandle {
   const instMap = new Map(score.instruments.map((i) => [i.id, i]));
   let idx = 0;
@@ -225,6 +228,8 @@ export function scheduleEvents(
     const now = ctx.currentTime;
     while (idx < events.length && events[idx].time < now + LOOKAHEAD_S) {
       const ev = events[idx++];
+      // 不该响的击点：不合成、不计入 scheduled、不触发高亮（但仍消耗队列位置）
+      if (audible && !audible(ev)) continue;
       const inst = instMap.get(ev.instrumentId);
       if (!inst) continue;
       synthesizeHit(ctx, master, inst, ev.hit, ev.time);
@@ -255,6 +260,7 @@ export function playRange(
   loopCount: number,
   onVisual?: (ev: ScheduleEvent) => void,
   startOffsetS = 0,
+  audible?: (ev: ScheduleEvent) => boolean,
 ): SchedulerHandle {
   void barTicks; // 保持引用一致性（未直接使用）
   const startAt = ctx.currentTime + 0.06 + startOffsetS;
@@ -262,5 +268,5 @@ export function playRange(
     loopCount > 1
       ? computeLoopEvents(score, fromTick, toTick, startAt, loopCount)
       : computeEvents(score.bars, score.bpm, score.freeMeter, score.instruments, fromTick, toTick, startAt);
-  return scheduleEvents(ctx, master, score, events, onVisual);
+  return scheduleEvents(ctx, master, score, events, onVisual, audible);
 }

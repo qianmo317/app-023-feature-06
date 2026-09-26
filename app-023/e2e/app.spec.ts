@@ -141,6 +141,94 @@ test.describe('试听', () => {
     await page.getByTestId('mute-gu').click();
     await expect(page.getByTestId('mute-gu')).toHaveClass(/on/);
   });
+
+  test('验收：独奏/静音决定发声，播放中切换即时生效且不重启', async ({ page }) => {
+    await page.goto('#/library');
+    await page.getByTestId('load-jijifeng').click();
+    await expect(page.getByTestId('editor-page')).toBeVisible();
+    const scheduled = () =>
+      page.evaluate(
+        () => (window as unknown as { __scheduled?: () => { instrumentId: string }[] }).__scheduled?.() ?? [],
+      );
+    const stopIfPlaying = async () => {
+      const label = await page.getByTestId('btn-play').textContent();
+      if (label?.includes('停止')) await page.getByTestId('btn-play').click();
+    };
+
+    // 循环播放走同一套过滤：循环中点「独」，下一轮循环起只剩独奏乐器
+    await page.getByTestId('btn-loop-set').click();
+    await page.getByTestId('btn-play').click();
+    await page.getByTestId('solo-daluo').click();
+    await expect
+      .poll(
+        async () => {
+          const evs = await scheduled();
+          return evs.length >= 3 && evs.every((e) => e.instrumentId === 'daluo');
+        },
+        { timeout: 9000 }, // 等下一轮循环重排（新句柄只含独奏生效后的事件）
+      )
+      .toBe(true);
+    await stopIfPlaying();
+    await page.getByTestId('solo-daluo').click(); // 取消独奏
+    await page.getByTestId('btn-loop-clear').click();
+
+    // 降速到 80 BPM：拉长击点间隔，给「播放中切换」断言留足时间窗
+    for (let i = 0; i < 36; i++) await page.getByTestId('bpm-down').click();
+    await expect(page.getByTestId('bpm-value')).toHaveText('80');
+
+    // 播放中点「独」：之后排入的击点只剩独奏乐器，且同一次播放不中断
+    await page.getByTestId('btn-play').click();
+    await page.getByTestId('solo-xiaoluo').click();
+    await page.waitForTimeout(250); // 等状态生效 + 一个调度周期
+    const n0 = (await scheduled()).length;
+    await expect
+      .poll(
+        async () => {
+          const tail = (await scheduled()).slice(n0);
+          return tail.length >= 3 && tail.every((e) => e.instrumentId === 'xiaoluo');
+        },
+        { timeout: 6000 },
+      )
+      .toBe(true);
+    // 未被打断重来的证明：独奏前已排入的其它乐器击点仍在同一次播放的队列里
+    const soFar = await scheduled();
+    expect(soFar.slice(0, n0).some((e) => e.instrumentId !== 'xiaoluo')).toBe(true);
+    await stopIfPlaying();
+    await page.getByTestId('solo-xiaoluo').click(); // 取消独奏
+
+    // 全部取消后恢复每个乐器都响
+    await page.getByTestId('btn-play').click();
+    await page.waitForTimeout(300); // 等 __scheduled 绑定到新句柄
+    await expect
+      .poll(async () => new Set((await scheduled()).map((e) => e.instrumentId)).size, { timeout: 4000 })
+      .toBeGreaterThanOrEqual(3);
+    await stopIfPlaying();
+
+    // 「默」：被静音的乐器不再发声，高亮列只跟会响的乐器
+    await page.getByTestId('mute-daluo').click();
+    await page.getByTestId('mute-bo').click();
+    await page.getByTestId('btn-play').click();
+    await page.waitForTimeout(300);
+    await expect
+      .poll(
+        async () => {
+          const evs = await scheduled();
+          return evs.length >= 3 && evs.every((e) => e.instrumentId === 'xiaoluo');
+        },
+        { timeout: 4000 },
+      )
+      .toBe(true);
+    await expect(page.getByTestId('grid-highlight')).toBeVisible({ timeout: 3000 }); // 小锣仍会点亮
+    await stopIfPlaying();
+
+    // 发声乐器全部被静音：既不响也不点亮
+    await page.getByTestId('mute-xiaoluo').click();
+    await page.getByTestId('btn-play').click();
+    await page.waitForTimeout(1200);
+    expect((await scheduled()).length).toBe(0);
+    await expect(page.getByTestId('grid-highlight')).toHaveCount(0);
+    await stopIfPlaying();
+  });
 });
 
 test.describe('持久化', () => {

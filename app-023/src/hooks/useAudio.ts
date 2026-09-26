@@ -1,6 +1,6 @@
 // 播放状态集中管理：AudioContext / 调度 / 循环 / 高亮位置 / 独奏静音
 // UI 组件只负责显示与用户动作（保持状态逻辑集中在此 hook）
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ScheduleEvent, Score } from '../types';
 import { barTicks, totalTicks } from '../lib/grid';
 import { playRange, tickSeconds, type SchedulerHandle } from '../lib/audio';
@@ -37,6 +37,7 @@ export function useAudio(score: Score) {
     return { ctx: ctxRef.current, master: masterRef.current! };
   }, []);
 
+  // 独奏/静音判定：读 ref 而非状态快照，调度器每次 pump 实时调用 → 播放中切换立即生效
   const audible = useCallback((ev: ScheduleEvent): boolean => {
     const { solo, muted } = soloMuteRef.current;
     if (solo.size > 0) return solo.has(ev.instrumentId);
@@ -73,12 +74,14 @@ export function useAudio(score: Score) {
           if (toTick <= fromTick) return;
 
           const visual = (ev: ScheduleEvent) => {
-            if (!audible(ev)) return;
+            if (!audible(ev)) return; // 高亮列只跟会响的乐器（触发时刻再判一次，取最新选择）
             const s2 = scoreRef.current;
             const before = s2.bars.slice(0, ev.barIndex).reduce((a, b) => a + barTicks(b.beatsPerBar), 0);
             setPosition({ bar: ev.barIndex, tick: before });
           };
-          const handle = playRange(ctx, master, s, fromTick, toTick, 1, visual);
+          // audible 实时谓词下达到调度器：播放前/循环/中段起播都按当前选择过滤，
+          // 播放中切换独/默立即生效且不打断当前小节（队列与时间轴不动）
+          const handle = playRange(ctx, master, s, fromTick, toTick, 1, visual, 0, audible);
           handleRef.current = handle;
           setPlaying(true);
           const durS = (toTick - fromTick) * tickSeconds(s.bpm) + 0.25;
@@ -126,14 +129,6 @@ export function useAudio(score: Score) {
 
   useEffect(() => () => handleRef.current?.stop(), []);
 
-  // 独奏/静音即时生效：重触发当前区间播放
-  const restartIfPlaying = useMemo(
-    () => (playingRef: boolean) => {
-      if (playingRef) play();
-    },
-    [play],
-  );
-
   return {
     playing,
     position,
@@ -145,7 +140,6 @@ export function useAudio(score: Score) {
     toggleSolo,
     toggleMute,
     debugEvents,
-    restartIfPlaying,
     ensureCtx,
   };
 }

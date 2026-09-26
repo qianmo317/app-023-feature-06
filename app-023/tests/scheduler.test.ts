@@ -1,5 +1,5 @@
 // 音频调度精度用例 —— 验收：BPM 120 连续 2 分钟偏差 < 10ms、无累积漂移；齐奏同刻发声
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { TICKS_PER_BEAT, type Score } from '../src/types';
 import { computeEvents, computeLoopEvents, scheduleEvents, tickSeconds } from '../src/lib/audio';
 import { scoreFromPattern, PATTERNS, newEmptyScore } from '../src/lib/factory';
@@ -142,6 +142,83 @@ describe('lookahead 调度器（mock ctx）', () => {
       expect(d).toBeGreaterThanOrEqual(-1e-12);
       expect(Math.round(d / per) * per - d).toBeCloseTo(0, 9);
     }
+  });
+
+  describe('独奏/静音实时过滤（audible 谓词）', () => {
+    it('被静音的乐器不合成、不进 scheduled、不触发视觉回调', () => {
+      vi.useFakeTimers();
+      try {
+        const ctx = new FakeAudioContext() as unknown as AudioContext;
+        const score = jijifeng();
+        const total = totalTicks(score.bars);
+        const events = computeEvents(score.bars, score.bpm, false, score.instruments, 0, total, ctx.currentTime + 0.06);
+        const visuals: string[] = [];
+        const handle = scheduleEvents(
+          ctx,
+          ctx.createGain(),
+          score,
+          events,
+          (ev) => visuals.push(ev.instrumentId),
+          (ev) => ev.instrumentId !== 'xiaoluo',
+        );
+        (ctx as unknown as { currentTime: number }).currentTime += 60; // 播完全曲
+        vi.advanceTimersByTime(200); // 触发 pump 与视觉回调
+        const done = handle.scheduled();
+        expect(done.length).toBeGreaterThan(0);
+        expect(done.some((e) => e.instrumentId === 'daluo')).toBe(true);
+        expect(done.every((e) => e.instrumentId !== 'xiaoluo')).toBe(true);
+        expect(visuals.length).toBeGreaterThan(0);
+        expect(visuals.every((id) => id !== 'xiaoluo')).toBe(true);
+        handle.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('播放中切换立即生效：谓词每次 pump 实时求值，队列不打断不重排', () => {
+      vi.useFakeTimers();
+      try {
+        const ctx = new FakeAudioContext() as unknown as AudioContext;
+        const base = jijifeng();
+        // 重复小节拼长谱，保证小锣击点贯穿整个时间轴
+        const bars = Array.from({ length: 12 }, (_, i) => ({ ...base.bars[i % base.bars.length], index: i }));
+        const score = { ...base, bars };
+        const events = computeEvents(score.bars, score.bpm, false, score.instruments, 0, totalTicks(score.bars), ctx.currentTime + 0.06);
+        let xiaoluoOn = false; // 起始：小锣被静音
+        const handle = scheduleEvents(
+          ctx,
+          ctx.createGain(),
+          score,
+          events,
+          undefined,
+          (ev) => ev.instrumentId !== 'xiaoluo' || xiaoluoOn,
+        );
+        const t = ctx as unknown as { currentTime: number };
+        // 第 1 段：小锣静音中 → 只排其它乐器
+        t.currentTime += 2;
+        vi.advanceTimersByTime(30);
+        const part1 = handle.scheduled();
+        expect(part1.length).toBeGreaterThan(0);
+        expect(part1.every((e) => e.instrumentId !== 'xiaoluo')).toBe(true);
+        // 取消静音 → 后续小锣击点立即被排入（无需重启调度）
+        xiaoluoOn = true;
+        t.currentTime += 2;
+        vi.advanceTimersByTime(30);
+        const part2 = handle.scheduled();
+        expect(part2.some((e) => e.instrumentId === 'xiaoluo')).toBe(true);
+        // 再次静音 → 小锣不再新增，其它乐器照常推进
+        xiaoluoOn = false;
+        const nXiaoluo = part2.filter((e) => e.instrumentId === 'xiaoluo').length;
+        t.currentTime += 2;
+        vi.advanceTimersByTime(30);
+        const part3 = handle.scheduled();
+        expect(part3.filter((e) => e.instrumentId === 'xiaoluo').length).toBe(nXiaoluo);
+        expect(part3.length).toBeGreaterThan(part2.length);
+        handle.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });
 
